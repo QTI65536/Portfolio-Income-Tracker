@@ -201,7 +201,7 @@ with t_dash:
 
         # Summary Metrics
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Balance", f"${df['MV'].sum():,.0f}")
+        m1.metric("Portfolio Value", f"${df['MV'].sum():,.0f}")
         m2.metric("Annual Income", f"${df['Income'].sum():,.2f}")
         m3.metric("Div. Yield", f"{(df['Income'].sum()/df['MV'].sum()*100) if df['MV'].sum()>0 else 0:.2f}%")
         m4.metric("YOC", f"{(df['Income'].sum()/(df['Shares']*df['Avg Cost']).sum()*100) if (df['Shares']*df['Avg Cost']).sum()>0 else 0:.2f}%")
