@@ -17,36 +17,93 @@ st.markdown("""
     [data-testid="stMetricValue"] { font-size: 48px !important; }
     .master-title { font-size: 52px !important; color: #2c3e50; font-weight: 900; border-bottom: 3px solid #2ecc71; padding-bottom: 10px; }
     .app-branding { font-size: 22px !important; color: #7f8c8d; font-weight: 400; margin-bottom: -10px; }
-    /* Checkbox Alignment */
-    .stCheckbox { margin-top: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
 HOVER_STYLE = dict(bgcolor="white", font_size=22, font_family="Arial", bordercolor="#2ecc71")
 
-# --- 2. DATA ENGINE ---
+HARDCODED_CEFS = {
+    'ADX', 'AIO', 'ASGI', 'BME', 'BST', 'BUI', 'CSQ', 'DNP', 'EOS', 'ERH', 
+    'GDV', 'GLU', 'GOF', 'NBXG', 'NIE', 'PCN', 'PDI', 'PDO', 'PDX', 'RFI', 
+    'RLTY', 'RNP', 'RQI', 'STK', 'UTF', 'UTG'
+}
+
+# --- 2. DATA ENGINE (FULL FORENSIC RESTORATION) ---
 @st.cache_data(ttl=3600)
 def get_unified_data(tickers):
     if not tickers: return {}
+    # Bulk Fetch Prices and Dividend Actions
     raw_data = yf.download(tickers, period="1y", actions=True, auto_adjust=True, progress=False)
+    
     meta = {}
     for t in tickers:
         try:
             t_data = raw_data.xs(t, level=1, axis=1) if len(tickers) > 1 else raw_data
             curr_price = float(t_data['Close'].iloc[-1])
-            div_h = t_data['Dividends']
-            tk = yf.Ticker(t); info = tk.info
+            div_history = t_data['Dividends']
+            
+            tk = yf.Ticker(t)
+            info = tk.info
+            
+            # Dividend Recovery Logic
             div_rate = float(info.get('dividendRate') or 0)
-            if div_rate == 0 and not div_h.empty:
-                div_rate = float(div_h[div_h.index > (datetime.now() - timedelta(days=365))].sum())
-            latest_ex = int(div_h[div_h > 0].index[-1].timestamp()) if not div_h[div_h > 0].empty else None
+            if div_rate == 0 and not div_history.empty:
+                div_rate = float(div_history[div_history.index > (datetime.now() - timedelta(days=365))].sum())
+            
+            # --- GOLDEN CEF DETECTION ENGINE ---
+            quote_type = info.get('quoteType', '').upper()
+            long_summary = info.get('longBusinessSummary', '').lower()
+            industry = info.get('industry', '').lower()
+            sector_raw = info.get('sector', '')
+            
+            is_hardcoded = t in HARDCODED_CEFS
+            cef_keywords = ["closed-end", "statutory trust", "management investment company", "closed-end fund"]
+            is_cef_by_summary = any(kw in long_summary for kw in cef_keywords)
+            is_reit_marker = "reit" in industry or "real estate investment trust" in long_summary
+            
+            # The logic that catches CEFs labeled as Equity/Mutual Fund
+            is_cef = is_hardcoded or ((quote_type == "MUTUALFUND" or is_cef_by_summary) and not is_reit_marker) or \
+                     (quote_type == "EQUITY" and "asset management" in industry and not sector_raw)
+            
+            sector = "Closed-End Fund" if is_cef else (quote_type if quote_type == "ETF" else (sector_raw if sector_raw else "Other"))
+
+            # --- GOLDEN SAFETY ENGINE ---
+            red_flags = []
+            if sector not in ["Closed-End Fund", "ETF"]:
+                is_reit = "reit" in industry or sector == "Real Estate"
+                ebitda = info.get('ebitda', 0) or 0
+                int_exp = info.get('interestExpense', 0) or 0
+                debt_to_equity = (info.get('debtToEquity', 0) or 0) / 100
+                ocf = info.get('operatingCashflow', 0) or 0
+                capex = abs(info.get('capitalExpenditures', 0) or 0)
+                total_div_paid = div_rate * info.get('sharesOutstanding', 1)
+
+                if is_reit:
+                    affo = ocf - capex
+                    payout = total_div_paid / affo if affo > 0 else 1.5
+                    if payout > 0.90: red_flags.append("High AFFO Payout")
+                else:
+                    payout = info.get('payoutRatio', 0) or 0
+                    if payout > 0.75: red_flags.append("High EPS Payout")
+                
+                if debt_to_equity > 2.5: red_flags.append("High Leverage")
+                if int_exp > 0 and (ebitda / int_exp) < 2.0: red_flags.append("Weak Interest Cov")
+
+            flag_count = len(red_flags)
+            tier = "Tier 1: ✅ SAFE" if flag_count == 0 else ("Tier 2: ⚠️ STABLE" if flag_count == 1 else "Tier 3: 🚨 RISK")
+            
+            # Frequency & Ex-Date
+            pay_count = len(div_history[div_history > 0])
+            freq = 12 if pay_count > 6 else 4
+            latest_ex = int(div_history[div_history > 0].index[-1].timestamp()) if not div_history[div_history > 0].empty else None
+
             meta[t] = {
-                'price': curr_price, 'div': div_rate, 'freq': 12 if len(div_h[div_h > 0]) > 6 else 4,
-                'ex_date': latest_ex, 'sector': info.get('sector', 'Other'),
-                'safety': "Tier 1: ✅ SAFE" if (info.get('payoutRatio', 0) or 0) < 0.75 else "Tier 2: ⚠️ STABLE",
-                'name': info.get('shortName', t)
+                'price': curr_price, 'div': div_rate, 'freq': freq, 'ex_date': latest_ex,
+                'sector': sector, 'safety': tier, 'name': info.get('shortName', t)
             }
-        except: meta[t] = {'price': 0.0, 'div': 0.0, 'freq': 4, 'ex_date': None, 'sector': 'Other', 'safety': 'Tier 3: 🚨 RISK'}
+            time.sleep(0.1) # Throttling for Cloud IP safety
+        except:
+            meta[t] = {'price': 0.0, 'div': 0.0, 'freq': 4, 'ex_date': None, 'sector': 'Unknown', 'safety': 'Tier 3: 🚨 RISK'}
     return meta
 
 def clean_numeric(value):
@@ -78,7 +135,8 @@ with st.sidebar:
                 st.session_state.active_portfolio_name = f.name
     if st.session_state.portfolios:
         for n in list(st.session_state.portfolios.keys()):
-            if st.sidebar.button(f"📍 {strip_ext(n)}" if n == st.session_state.get('active_portfolio_name') else strip_ext(n), use_container_width=True):
+            is_active = (n == st.session_state.get('active_portfolio_name'))
+            if st.sidebar.button(f"📍 {strip_ext(n)}" if is_active else strip_ext(n), use_container_width=True):
                 st.session_state.active_portfolio_name = n; st.rerun()
 
 # --- 5. MAIN UI ---
@@ -93,19 +151,15 @@ t_dash, t_edit = st.tabs(["📊 Dashboard & Analytics", "✏️ Edit Positions"]
 with t_edit:
     df_edit = st.session_state.portfolios[active]
     
-    # Feature 1: Rename Portfolio
-    st.subheader("📁 Portfolio Settings")
+    st.subheader("📁 Portfolio Management")
     new_name = st.text_input("Rename Portfolio", value=strip_ext(active)).strip()
     if new_name and new_name != strip_ext(active):
         new_key = f"{new_name}.csv"
         st.session_state.portfolios[new_key] = st.session_state.portfolios.pop(active)
-        st.session_state.active_portfolio_name = new_key
-        st.rerun()
+        st.session_state.active_portfolio_name = new_key; st.rerun()
 
     st.divider()
-    
-    # Feature 4: Commit and Auto-Save Prep
-    st.subheader("➕ Add or Update Position")
+    st.subheader("➕ Add / Update Position")
     with st.form("entry_form", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
         nt = c1.text_input("Ticker").upper().strip()
@@ -118,50 +172,33 @@ with t_edit:
                 else:
                     new_row = pd.DataFrame([{"Ticker": nt, "Shares": ns, "Avg Cost": nc}])
                     st.session_state.portfolios[active] = pd.concat([df_edit, new_row], ignore_index=True)
-                st.toast(f"Updated {nt}!")
                 st.rerun()
 
     st.divider()
-
-    # Feature 3: Bulk Remove with Checkboxes
-    st.subheader("📋 Current Positions")
+    st.subheader("📋 Inventory")
     to_remove = []
-    
-    # Header Row
-    h1, h2, h3, h4 = st.columns([1, 2, 2, 2])
-    h1.write("**Select**")
-    h2.write("**Ticker**")
-    h3.write("**Shares**")
-    h4.write("**Avg Cost**")
+    cols = st.columns([1, 2, 2, 2])
+    cols[0].write("**Select**"); cols[1].write("**Ticker**"); cols[2].write("**Shares**"); cols[3].write("**Avg Cost**")
     
     for idx, row in df_edit.iterrows():
-        r1, r2, r3, r4 = st.columns([1, 2, 2, 2])
-        if r1.checkbox("", key=f"check_{active}_{idx}"):
-            to_remove.append(idx)
-        r2.write(f"**{row['Ticker']}**")
-        r3.write(f"{row['Shares']:,.2f}")
-        r4.write(f"${row['Avg Cost']:,.2f}")
+        r = st.columns([1, 2, 2, 2])
+        if r[0].checkbox("", key=f"rm_{idx}"): to_remove.append(idx)
+        r[1].write(f"**{row['Ticker']}**")
+        r[2].write(f"{row['Shares']:,.2f}")
+        r[3].write(f"${row['Avg Cost']:,.2f}")
     
-    if to_remove:
-        if st.button(f"🗑️ Remove Selected ({len(to_remove)})", type="primary"):
-            st.session_state.portfolios[active] = df_edit.drop(to_remove)
-            st.rerun()
+    if to_remove and st.button(f"🗑️ Delete Selected ({len(to_remove)})", type="primary"):
+        st.session_state.portfolios[active] = df_edit.drop(to_remove)
+        st.rerun()
 
     st.write("---")
-    # Feature 2: Restore Save Button
-    csv_data = df_edit.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label=f"💾 Save Current Portfolio ({strip_ext(active)})",
-        data=csv_data,
-        file_name=f"{strip_ext(active)}.csv",
-        mime='text/csv',
-        use_container_width=True
-    )
+    csv = df_edit.to_csv(index=False).encode('utf-8')
+    st.download_button(f"💾 Save {strip_ext(active)}", data=csv, file_name=f"{strip_ext(active)}.csv", mime='text/csv', use_container_width=True)
 
 with t_dash:
     df = st.session_state.portfolios[active].copy()
     if not df.empty:
-        with st.spinner("Syncing Golden Engines..."):
+        with st.spinner("Executing Forensic Audit..."):
             meta = get_unified_data(df['Ticker'].unique().tolist())
         
         df['Price'] = df['Ticker'].map(lambda x: float(meta.get(x, {}).get('price', 0)))
@@ -169,7 +206,7 @@ with t_dash:
         df['MV'] = df['Shares'] * df['Price']
         df['Income'] = df['Shares'] * df['Div']
         df['Sector'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('sector', 'Other'))
-        df['Safety'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('safety', 'Tier 2: ⚠️ STABLE'))
+        df['Safety'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('safety', 'Tier 3: 🚨 RISK'))
         df['Freq'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('freq', 4))
         df['Ex_Date'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('ex_date'))
 
@@ -178,7 +215,7 @@ with t_dash:
         m1.metric("Balance", f"${df['MV'].sum():,.0f}")
         m2.metric("Annual Income", f"${df['Income'].sum():,.2f}")
         m3.metric("Div. Yield", f"{(df['Income'].sum()/df['MV'].sum()*100) if df['MV'].sum()>0 else 0:.2f}%")
-        m4.metric("Yield on Cost", f"{(df['Income'].sum()/(df['Shares']*df['Avg Cost']).sum()*100) if (df['Shares']*df['Avg Cost']).sum()>0 else 0:.2f}%")
+        m4.metric("YOC", f"{(df['Income'].sum()/(df['Shares']*df['Avg Cost']).sum()*100) if (df['Shares']*df['Avg Cost']).sum()>0 else 0:.2f}%")
 
         st.divider()
         c1, c2, c3 = st.columns(3)
@@ -189,6 +226,7 @@ with t_dash:
                 b = "<br>".join([f"• {t}: <b>${amt:,.2f}</b>" for t, amt in zip(s_g['Ticker'], s_g[val_col])])
                 return pd.Series({'Val': g[val_col].sum(), 'Hover': f"<b>Total: ${g[val_col].sum():,.2f}</b><br><br>{b}"})
             sum_df = pdf.groupby(label_col).apply(agg).reset_index()
+            # Restore Gold Color Palette
             colors = ['#2ecc71', '#f1c40f', '#e74c3c'] if label_col == 'Safety' else px.colors.qualitative.Pastel
             f = go.Figure(data=[go.Pie(labels=sum_df[label_col], values=sum_df['Val'], hole=hole, marker=dict(colors=colors), customdata=sum_df['Hover'], hovertemplate="<b>%{label}</b><br>%{customdata}<extra></extra>")])
             f.update_layout(height=600, margin=dict(t=30, b=80), hoverlabel=HOVER_STYLE)
@@ -202,13 +240,13 @@ with t_dash:
             g = st.number_input("Growth %", value=6.0, step=0.5)
             proj = [df['Income'].sum() * ((1 + g/100)**i) for i in range(11)]
             fig_g = px.area(x=[datetime.now().year + i for i in range(11)], y=proj)
-            fig_g.update_layout(hoverlabel=HOVER_STYLE, height=450)
+            fig_g.update_layout(hoverlabel=HOVER_STYLE, height=450, xaxis_title="Year", yaxis_title="Income ($)")
             fig_g.update_traces(hovertemplate="<b>Year: %{x}</b><br>Income: $%{y:,.2f}<extra></extra>")
             st.plotly_chart(fig_g, use_container_width=True)
         with c3:
             st.subheader("Sector Allocation")
-            v_toggle = st.radio("Toggle View:", ["Market Value", "Annual Income"], horizontal=True)
-            draw_donut(df, "MV" if v_toggle == "Market Value" else "Income", "Sector")
+            v_t = st.radio("Toggle View:", ["Market Value", "Annual Income"], horizontal=True)
+            draw_donut(df, "MV" if v_t == "Market Value" else "Income", "Sector")
 
         st.divider()
         st.subheader("📅 Monthly Income Distribution")
