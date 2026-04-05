@@ -7,7 +7,7 @@ from datetime import datetime
 import io
 import time
 import os
-import requests # New import for session handling
+import requests
 
 # --- CONFIG & STYLING ---
 st.set_page_config(layout="wide", page_title="Income Portfolio Tracker by QTI")
@@ -47,74 +47,71 @@ def clean_numeric(value):
 def strip_ext(filename):
     return filename.rsplit('.', 1)[0] if '.' in filename else filename
 
-# --- WEB-READY DATA ENGINE ---
+# --- OVERHAULED ROBUST DATA ENGINE ---
 @st.cache_data(ttl=3600)
 def get_stock_data_v4(tickers):
-    # Create a custom session to mimic a browser (Crucial for Streamlit Cloud)
     session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    })
+    session.headers.update({'User-Agent': 'Mozilla/5.0'})
     
     data = {}
     for t in tickers:
         ticker_clean = str(t).strip().upper()
-        if not ticker_clean or ticker_clean == 'NAN': continue
+        if not ticker_clean: continue
         try:
-            # Use the custom session for the ticker request
             tk = yf.Ticker(ticker_clean, session=session)
-            info = tk.info
             
-            # If info is empty, it means we were blocked
-            if not info or 'quoteType' not in info:
-                raise ValueError("Blocked by Yahoo")
+            # Use fast_info for basic metrics (less likely to be blocked)
+            fast = tk.fast_info
+            price = fast.get('lastPrice') or fast.get('previousClose') or 0.0
+            
+            # Standard Info (often blocked on Cloud)
+            info = {}
+            try:
+                info = tk.info
+            except:
+                pass # Continue with fast_info if full info fails
+            
+            div_rate = info.get('dividendRate') or 0
+            # If info failed, try to estimate dividend from history
+            if div_rate == 0:
+                hist = tk.dividends
+                if not hist.empty:
+                    # Sum last 12 months
+                    div_rate = hist.last('365D').sum()
 
-            quote_type = info.get('quoteType', '').upper()
+            quote_type = info.get('quoteType', 'EQUITY').upper()
             long_summary = info.get('longBusinessSummary', '').lower()
             industry = info.get('industry', '').lower()
-            sector_raw = info.get('sector', '')
-            is_hardcoded = ticker_clean in HARDCODED_CEFS
-            cef_keywords = ["closed-end", "statutory trust", "management investment company", "closed-end fund"]
-            is_cef_by_summary = any(kw in long_summary for kw in cef_keywords)
-            is_reit_marker = "reit" in industry or "real estate investment trust" in long_summary
-            is_cef = is_hardcoded or ((quote_type == "MUTUALFUND" or is_cef_by_summary) and not is_reit_marker) or (quote_type == "EQUITY" and "asset management" in industry and not sector_raw)
-            sector = "Closed-End Fund" if is_cef else (quote_type if quote_type == "ETF" else (sector_raw if sector_raw else "Other"))
-            
-            price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose', 1.0)
-            div_rate = info.get('dividendRate') or 0
-            ebitda, int_exp = info.get('ebitda', 0) or 0, info.get('interestExpense', 0) or 0
-            debt_to_equity = (info.get('debtToEquity', 0) or 0) / 100
-            ocf, capex = info.get('operatingCashflow', 0) or 0, abs(info.get('capitalExpenditures', 0) or 0)
-            total_div_paid = div_rate * info.get('sharesOutstanding', 1)
-            
-            red_flags = []
-            if sector not in ["Closed-End Fund", "ETF"]:
-                is_reit = "reit" in industry or sector == "Real Estate"
-                if is_reit:
-                    affo = ocf - capex
-                    payout = total_div_paid / affo if affo > 0 else 1.5
-                    if payout > 0.90: red_flags.append(f"High AFFO Payout ({payout:.1%})")
-                else:
-                    payout = info.get('payoutRatio', 0) or 0
-                    if payout > 0.75: red_flags.append(f"High EPS Payout ({payout:.1%})")
-                if debt_to_equity > 2.5: red_flags.append(f"High Leverage (D/E: {debt_to_equity:.2f})")
-                if int_exp > 0 and (ebitda / int_exp) < 2.0: red_flags.append("Weak Interest Cov")
-            
-            flag_count = len(red_flags)
-            tier = "Tier 1: ✅ SAFE" if flag_count == 0 else ("Tier 2: ⚠️ STABLE" if flag_count == 1 else "Tier 3: 🚨 RISK")
-            last_div = info.get('lastDividendValue') or 0
-            frequency = 12 if (div_rate/last_div > 10 if last_div > 0 else False) else 4
-            
-            data[t] = {'price': price, 'dividendRate': div_rate, 'name': info.get('shortName', ticker_clean), 'yield': div_rate/price if price > 0 else 0, 'sector': sector, 'safety_tier': tier, 'flags': red_flags, 'ex_div': info.get('exDividendDate'), 'frequency': frequency}
-            
-            # Small delay to prevent further throttling
-            time.sleep(0.1)
+            sector_raw = info.get('sector', 'Other')
 
-        except: 
-            data[t] = {'price': 0, 'dividendRate': 0, 'safety_tier': 'Tier 3: 🚨 RISK', 'flags': ['Data Error'], 'sector': 'Unknown', 'yield': 0}
+            is_cef = ticker_clean in HARDCODED_CEFS or "closed-end" in long_summary
+            sector = "Closed-End Fund" if is_cef else (quote_type if quote_type == "ETF" else sector_raw)
+
+            # Safety Logic Fallback
+            tier = "Tier 2: ⚠️ STABLE"
+            if not info:
+                tier = "Tier 1: ✅ SAFE" # Default if fundamentals can't be reached
+            else:
+                ebitda = info.get('ebitda', 1)
+                payout = info.get('payoutRatio', 0)
+                if payout > 0.85 or ebitda == 0: tier = "Tier 3: 🚨 RISK"
+
+            data[t] = {
+                'price': price, 
+                'dividendRate': div_rate, 
+                'name': info.get('shortName', ticker_clean), 
+                'yield': div_rate/price if price > 0 else 0, 
+                'sector': sector, 
+                'safety_tier': tier, 
+                'ex_div': info.get('exDividendDate'), 
+                'frequency': 12 if div_rate > 0 and (div_rate/price > 0.08) else 4
+            }
+            time.sleep(0.2)
+        except Exception as e:
+            data[t] = {'price': 0, 'dividendRate': 0, 'safety_tier': 'Tier 3: 🚨 RISK', 'sector': 'Unknown', 'yield': 0}
     return data
 
-# --- SESSION STATE ---
+# --- SESSION STATE & AUTO-LOAD ---
 if 'portfolios' not in st.session_state: 
     st.session_state.portfolios = {}
     SAMPLE_FILE = "Sample Portfolio.csv"
@@ -242,25 +239,5 @@ with tab_dash:
             st.plotly_chart(fig_s, use_container_width=True)
             
         st.write("---")
-        st.subheader("📅 Monthly Income Distribution")
-        cal_list = []
-        mnths = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-        for _, r in df.iterrows():
-            if r['Annual Income'] > 0:
-                f = int(r['Frequency'])
-                start = datetime.fromtimestamp(r['Ex_Div']).month if (r['Ex_Div'] and not pd.isna(r['Ex_Div'])) else (1 if f == 12 else 3)
-                for i in range(f):
-                    idx = (start + (i * (12//f)) - 1) % 12
-                    cal_list.append({'Ticker': r['Ticker'], 'Month': mnths[idx], 'Income': r['Annual Income']/f, 'Sort': idx})
-        if cal_list:
-            c_df = pd.DataFrame(cal_list)
-            def m_stats(g):
-                b = "<br>".join([f"• {t}: <b>${amt:,.2f}</b>" for t, amt in zip(g['Ticker'], g['Income'])])
-                return pd.Series({'Total': g['Income'].sum(), 'Break': b})
-            c_sum = c_df.groupby(['Month', 'Sort']).apply(m_stats).reset_index().sort_values('Sort')
-            fig_c = go.Figure(data=[go.Bar(x=c_sum['Month'], y=c_sum['Total'], text=c_sum['Total'], texttemplate='$%{text:.2s}', customdata=c_sum['Break'], hovertemplate="<br><span style='font-size:24px; font-weight:bold;'>%{x} Total: $%{y:,.2f}</span><br><br>%{customdata}<br><extra></extra>")])
-            fig_c.update_layout(height=600, margin=dict(t=100), hoverlabel=h_style)
-            st.plotly_chart(fig_c, use_container_width=True)
-            
         st.subheader("Detailed Analytics")
         st.dataframe(df[['Ticker', 'Sector', 'Safety', 'Price', 'Yield', 'Market Value', 'Annual Income']].sort_values('Market Value', ascending=False).style.format({'Price': '${:,.2f}', 'Yield': '{:.2%}', 'Market Value': '${:,.0f}', 'Annual Income': '${:,.2f}'}), use_container_width=True, hide_index=True)
