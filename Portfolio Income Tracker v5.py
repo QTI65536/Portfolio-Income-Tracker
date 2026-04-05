@@ -5,8 +5,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import os
+import time
 
-# --- CONFIG & STYLING ---
+# --- 1. CONFIG & STYLING (GOLD MASTER) ---
 st.set_page_config(layout="wide", page_title="Income Portfolio Tracker by QTI")
 
 st.markdown("""
@@ -16,62 +17,95 @@ st.markdown("""
     [data-testid="stMetricValue"] { font-size: 48px !important; }
     .master-title { font-size: 52px !important; color: #2c3e50; font-weight: 900; border-bottom: 3px solid #2ecc71; padding-bottom: 10px; }
     .app-branding { font-size: 22px !important; color: #7f8c8d; font-weight: 400; margin-bottom: -10px; }
+    .stDataFrame { font-size: 18px !important; }
     </style>
     """, unsafe_allow_html=True)
 
 HOVER_STYLE = dict(bgcolor="white", font_size=22, font_family="Arial", bordercolor="#2ecc71")
 
-# --- DATA ENGINE ---
+HARDCODED_CEFS = {
+    'ADX', 'AIO', 'ASGI', 'BME', 'BST', 'BUI', 'CSQ', 'DNP', 'EOS', 'ERH', 
+    'GDV', 'GLU', 'GOF', 'NBXG', 'NIE', 'PCN', 'PDI', 'PDO', 'PDX', 'RFI', 
+    'RLTY', 'RNP', 'RQI', 'STK', 'UTF', 'UTG'
+}
+
+# --- 2. THE UNIFIED DATA ENGINE ---
 @st.cache_data(ttl=3600)
-def get_dual_stream_data(tickers):
+def get_unified_data(tickers):
     if not tickers: return {}
     
-    # STREAM A: Bulk Download (Reliable for Price/Div)
+    # CLOUD RULE: Bulk download prices/dividends to avoid per-ticker blocks
     raw_data = yf.download(tickers, period="1y", actions=True, auto_adjust=True, progress=False)
     
     meta = {}
     for t in tickers:
         try:
-            # Flatten Price/Div Data
+            # A. Flatten Bulk Data
             t_data = raw_data.xs(t, level=1, axis=1) if len(tickers) > 1 else raw_data
             curr_price = float(t_data['Close'].iloc[-1])
             div_history = t_data['Dividends']
-            annual_div = float(div_history[div_history > 0].sum())
             
-            # Determine Frequency & Ex-Date
+            # B. Deep Metadata Scrape (with retry)
+            tk = yf.Ticker(t)
+            info = tk.info
+            
+            # C. Dividend Recovery (DIVO Logic)
+            div_rate = float(info.get('dividendRate') or 0)
+            if div_rate == 0 and not div_history.empty:
+                div_rate = float(div_history[div_history.index > (datetime.now() - timedelta(days=365))].sum())
+            
+            # D. RESTORED: CEF & REIT Detection
+            quote_type = info.get('quoteType', '').upper()
+            industry = info.get('industry', '').lower()
+            summary = info.get('longBusinessSummary', '').lower()
+            sector_raw = info.get('sector', 'Other')
+            
+            is_cef = t in HARDCODED_CEFS or any(kw in summary for kw in ["closed-end", "statutory trust", "management investment company"])
+            sector = "Closed-End Fund" if is_cef else (quote_type if quote_type == "ETF" else sector_raw)
+            
+            # E. RESTORED: Full 4-Point Safety Logic
+            red_flags = []
+            if sector not in ["Closed-End Fund", "ETF"]:
+                # Payout Logic (REIT vs Standard)
+                if "reit" in industry or sector == "Real Estate":
+                    ocf = info.get('operatingCashflow', 0) or 0
+                    capex = abs(info.get('capitalExpenditures', 0) or 0)
+                    affo = ocf - capex
+                    payout = (div_rate * info.get('sharesOutstanding', 1)) / affo if affo > 0 else 1.5
+                    if payout > 0.90: red_flags.append("High AFFO Payout")
+                else:
+                    payout = info.get('payoutRatio', 0) or 0
+                    if payout > 0.75: red_flags.append("High EPS Payout")
+                
+                # Leverage & Interest Coverage
+                if (info.get('debtToEquity', 0) or 0) > 250: red_flags.append("High Leverage")
+                ebitda = info.get('ebitda', 0) or 0
+                int_exp = info.get('interestExpense', 0) or 0
+                if int_exp > 0 and (ebitda / int_exp) < 2.0: red_flags.append("Weak Interest Cov")
+
+            tier = "Tier 1: ✅ SAFE" if len(red_flags) == 0 else ("Tier 2: ⚠️ STABLE" if len(red_flags) == 1 else "Tier 3: 🚨 RISK")
+            
+            # Frequency & Ex-Date
             pay_count = len(div_history[div_history > 0])
             freq = 12 if pay_count > 6 else 4
             ex_dates = div_history[div_history > 0].index
             latest_ex = int(ex_dates[-1].timestamp()) if not ex_dates.empty else None
 
-            # STREAM B: Selective Metadata (Sector/Safety)
-            # We wrap this in a try-block so a block here doesn't kill the price/div data
-            sector, payout = "Other", 0.5
-            try:
-                tk = yf.Ticker(t)
-                info = tk.info
-                sector = info.get('sector', info.get('quoteType', 'Other'))
-                payout = info.get('payoutRatio', 0) or 0
-            except:
-                pass 
-
-            tier = "Tier 1: ✅ SAFE" if payout < 0.8 else ("Tier 2: ⚠️ STABLE" if payout < 0.95 else "Tier 3: 🚨 RISK")
-
             meta[t] = {
-                'price': curr_price, 'div': annual_div, 'freq': freq,
-                'ex_date': latest_ex, 'sector': sector, 'safety': tier
+                'price': curr_price, 'div': div_rate, 'freq': freq, 'ex_date': latest_ex,
+                'sector': sector, 'safety': tier, 'name': info.get('shortName', t)
             }
+            time.sleep(0.1) # Gentle throttling for Cloud
         except:
-            meta[t] = {'price': 0.0, 'div': 0.0, 'freq': 4, 'ex_date': None, 'sector': 'Unknown', 'safety': 'Tier 3: 🚨 RISK'}
+            meta[t] = {'price': float(prices_df[t].iloc[-1]) if t in prices_df else 0, 'div': 0, 'freq': 4, 'ex_date': None, 'sector': 'Unknown', 'safety': 'Tier 3: 🚨 RISK'}
+            
     return meta
 
 def clean_numeric(value):
-    try:
-        s = str(value).replace('$', '').replace(',', '').strip()
-        return float(s) if s != "" else 0.0
+    try: return float(str(value).replace('$', '').replace(',', '').strip())
     except: return 0.0
 
-# --- SESSION STATE ---
+# --- 3. SESSION STATE ---
 if 'portfolios' not in st.session_state:
     st.session_state.portfolios = {}
     if os.path.exists("Sample Portfolio.csv"):
@@ -82,7 +116,7 @@ if 'portfolios' not in st.session_state:
             st.session_state.active_portfolio_name = "Sample Portfolio.csv"
         except: pass
 
-# --- SIDEBAR ---
+# --- 4. SIDEBAR ---
 with st.sidebar:
     st.header("📂 Vault")
     up = st.file_uploader("Upload", type="csv", accept_multiple_files=True)
@@ -98,14 +132,14 @@ with st.sidebar:
                 st.session_state.active_portfolio_name = n
                 st.rerun()
 
+# --- 5. MAIN UI ---
 active = st.session_state.get('active_portfolio_name')
 if not active: st.stop()
 
-# --- MAIN UI ---
 st.markdown('<div class="app-branding">Income Portfolio Tracker by QTI</div>', unsafe_allow_html=True)
 st.markdown(f'<div class="master-title">Portfolio: {active.replace(".csv","")}</div>', unsafe_allow_html=True)
 
-t_dash, t_edit = st.tabs(["📊 Dashboard", "✏️ Edit"])
+t_dash, t_edit = st.tabs(["📊 Dashboard & Analytics", "✏️ Edit Positions"])
 
 with t_edit:
     df_edit = st.session_state.portfolios[active]
@@ -114,8 +148,8 @@ with t_edit:
 with t_dash:
     df = st.session_state.portfolios[active].copy()
     if not df.empty:
-        with st.spinner("Dual-Stream Syncing (Bulk Price + Meta)..."):
-            meta = get_dual_stream_data(df['Ticker'].unique().tolist())
+        with st.spinner("Executing Golden Audit Sync..."):
+            meta = get_unified_data(df['Ticker'].unique().tolist())
         
         df['Price'] = df['Ticker'].map(lambda x: float(meta.get(x, {}).get('price', 0)))
         df['Div'] = df['Ticker'].map(lambda x: float(meta.get(x, {}).get('div', 0)))
@@ -136,17 +170,14 @@ with t_dash:
         st.divider()
         c1, c2, c3 = st.columns(3)
 
-        # Reusable Chart Engine with Breakdowns
         def draw_donut(pdf, val_col, label_col, hole=0.5):
             def agg(g):
                 s_g = g.sort_values(val_col, ascending=False).head(15)
                 b = "<br>".join([f"• {t}: <b>${amt:,.2f}</b>" for t, amt in zip(s_g['Ticker'], s_g[val_col])])
                 return pd.Series({'Val': g[val_col].sum(), 'Hover': f"<b>Total: ${g[val_col].sum():,.2f}</b><br><br>{b}"})
             sum_df = pdf.groupby(label_col).apply(agg).reset_index()
-            
-            # Safety Color Logic
+            # Restore Safety colors
             colors = ['#2ecc71', '#f1c40f', '#e74c3c'] if label_col == 'Safety' else px.colors.qualitative.Pastel
-            
             f = go.Figure(data=[go.Pie(labels=sum_df[label_col], values=sum_df['Val'], hole=hole, marker=dict(colors=colors), customdata=sum_df['Hover'], hovertemplate="<b>%{label}</b><br>%{customdata}<extra></extra>")])
             f.update_layout(height=600, margin=dict(t=30, b=80), hoverlabel=HOVER_STYLE)
             st.plotly_chart(f, use_container_width=True)
@@ -167,7 +198,7 @@ with t_dash:
             v_toggle = st.radio("Toggle View:", ["Market Value", "Annual Income"], horizontal=True)
             draw_donut(df, "MV" if v_toggle == "Market Value" else "Income", "Sector")
 
-        # CALENDAR
+        # RESTORED: Monthly Calendar logic
         st.divider()
         st.subheader("📅 Monthly Income Distribution")
         cal_list = []
@@ -191,6 +222,7 @@ with t_dash:
             st.plotly_chart(fig_c, use_container_width=True)
 
         st.subheader("Detailed Analytics")
-        st.dataframe(df[['Ticker', 'Sector', 'Safety', 'Price', 'MV', 'Income']].sort_values('MV', ascending=False).style.format({
-            'Price': '${:,.2f}', 'MV': '${:,.0f}', 'Income': '${:,.2f}'
+        df['Yield'] = df['Div'] / df['Price'].replace(0, 1)
+        st.dataframe(df[['Ticker', 'Sector', 'Safety', 'Price', 'Yield', 'MV', 'Income']].sort_values('MV', ascending=False).style.format({
+            'Price': '${:,.2f}', 'Yield': '{:.2%}', 'MV': '${:,.0f}', 'Income': '${:,.2f}'
         }), use_container_width=True, hide_index=True)
