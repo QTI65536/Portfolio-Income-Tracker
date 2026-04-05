@@ -28,15 +28,13 @@ HARDCODED_CEFS = {
     'RLTY', 'RNP', 'RQI', 'STK', 'UTF', 'UTG'
 }
 
-# --- 2. HELPERS (SANITY CHECKS) ---
+# --- 2. HELPERS ---
 def clean_numeric(value):
-    """Force value to float, handling strings, currency symbols, and NaNs."""
     try:
         if pd.isna(value): return 0.0
         s = str(value).replace('$', '').replace(',', '').strip()
         return float(s) if s != "" else 0.0
-    except:
-        return 0.0
+    except: return 0.0
 
 def strip_ext(filename):
     return filename.rsplit('.', 1)[0] if '.' in filename else filename
@@ -98,9 +96,7 @@ if 'portfolios' not in st.session_state:
     if os.path.exists("Sample Portfolio.csv"):
         try:
             sdf = pd.read_csv("Sample Portfolio.csv"); sdf.columns = sdf.columns.str.strip()
-            # AUTO-CLEAN on Load
-            sdf['Shares'] = sdf['Shares'].apply(clean_numeric)
-            sdf['Avg Cost'] = sdf['Avg Cost'].apply(clean_numeric)
+            sdf['Shares'] = sdf['Shares'].apply(clean_numeric); sdf['Avg Cost'] = sdf['Avg Cost'].apply(clean_numeric)
             st.session_state.portfolios["Sample Portfolio.csv"] = sdf[["Ticker", "Shares", "Avg Cost"]].dropna()
             st.session_state.active_portfolio_name = "Sample Portfolio.csv"
         except: pass
@@ -113,9 +109,7 @@ with st.sidebar:
         for f in up:
             if f.name not in st.session_state.portfolios:
                 d = pd.read_csv(f); d.columns = d.columns.str.strip()
-                # AUTO-CLEAN on Upload
-                d['Shares'] = d['Shares'].apply(clean_numeric)
-                d['Avg Cost'] = d['Avg Cost'].apply(clean_numeric)
+                d['Shares'] = d['Shares'].apply(clean_numeric); d['Avg Cost'] = d['Avg Cost'].apply(clean_numeric)
                 st.session_state.portfolios[f.name] = d[["Ticker", "Shares", "Avg Cost"]].dropna()
                 st.session_state.active_portfolio_name = f.name
     if st.session_state.portfolios:
@@ -133,11 +127,7 @@ st.markdown(f'<div class="master-title">Portfolio: {strip_ext(active)}</div>', u
 t_dash, t_edit = st.tabs(["📊 Dashboard & Analytics", "✏️ Edit Positions"])
 
 with t_edit:
-    # RE-ENFORCE Numeric values for the Edit Tab
     df_edit = st.session_state.portfolios[active]
-    df_edit['Shares'] = df_edit['Shares'].apply(clean_numeric)
-    df_edit['Avg Cost'] = df_edit['Avg Cost'].apply(clean_numeric)
-
     st.subheader("📁 Portfolio Management")
     new_name = st.text_input("Rename Portfolio", value=strip_ext(active)).strip()
     if new_name and new_name != strip_ext(active):
@@ -154,30 +144,22 @@ with t_edit:
         nc = c3.number_input("Avg Cost", min_value=0.0)
         if st.form_submit_button("Commit to Portfolio"):
             if nt:
-                if nt in df_edit['Ticker'].values:
-                    df_edit.loc[df_edit['Ticker'] == nt, ['Shares', 'Avg Cost']] = [ns, nc]
-                else:
-                    new_row = pd.DataFrame([{"Ticker": nt, "Shares": ns, "Avg Cost": nc}])
-                    st.session_state.portfolios[active] = pd.concat([df_edit, new_row], ignore_index=True)
+                if nt in df_edit['Ticker'].values: df_edit.loc[df_edit['Ticker'] == nt, ['Shares', 'Avg Cost']] = [ns, nc]
+                else: st.session_state.portfolios[active] = pd.concat([df_edit, pd.DataFrame([{"Ticker": nt, "Shares": ns, "Avg Cost": nc}])], ignore_index=True)
                 st.rerun()
 
     st.divider()
     st.subheader("📋 Inventory")
     to_remove = []
-    r_head = st.columns([1, 2, 2, 2])
-    r_head[0].write("**Select**"); r_head[1].write("**Ticker**"); r_head[2].write("**Shares**"); r_head[3].write("**Avg Cost**")
-    
+    cols = st.columns([1, 2, 2, 2])
+    cols[0].write("**Select**"); cols[1].write("**Ticker**"); cols[2].write("**Shares**"); cols[3].write("**Avg Cost**")
     for idx, row in df_edit.iterrows():
         r = st.columns([1, 2, 2, 2])
         if r[0].checkbox("", key=f"rm_{idx}"): to_remove.append(idx)
-        r[1].write(f"**{row['Ticker']}**")
-        # CRITICAL FIX: Ensure values are float before string formatting
-        r[2].write(f"{float(row['Shares']):,.2f}")
-        r[3].write(f"${float(row['Avg Cost']):,.2f}")
+        r[1].write(f"**{row['Ticker']}**"); r[2].write(f"{float(row['Shares']):,.2f}"); r[3].write(f"${float(row['Avg Cost']):,.2f}")
     
     if to_remove and st.button(f"🗑️ Delete Selected ({len(to_remove)})", type="primary"):
-        st.session_state.portfolios[active] = df_edit.drop(to_remove)
-        st.rerun()
+        st.session_state.portfolios[active] = df_edit.drop(to_remove); st.rerun()
 
     st.write("---")
     csv = df_edit.to_csv(index=False).encode('utf-8')
@@ -187,8 +169,7 @@ with t_dash:
     df = st.session_state.portfolios[active].copy()
     if not df.empty:
         df['Shares'] = df['Shares'].apply(clean_numeric)
-        with st.spinner("Syncing..."):
-            meta = get_unified_data(df['Ticker'].unique().tolist())
+        with st.spinner("Syncing..."): meta = get_unified_data(df['Ticker'].unique().tolist())
         
         df['Price'] = df['Ticker'].map(lambda x: float(meta.get(x, {}).get('price', 0)))
         df['Div'] = df['Ticker'].map(lambda x: float(meta.get(x, {}).get('div', 0)))
@@ -199,42 +180,42 @@ with t_dash:
         df['Freq'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('freq', 4))
         df['Ex_Date'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('ex_date'))
 
-        # Summary Metrics
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Portfolio Value", f"${df['MV'].sum():,.0f}")
-        m2.metric("Annual Income", f"${df['Income'].sum():,.2f}")
-        m3.metric("Div. Yield", f"{(df['Income'].sum()/df['MV'].sum()*100) if df['MV'].sum()>0 else 0:.2f}%")
-        m4.metric("YOC", f"{(df['Income'].sum()/(df['Shares']*df['Avg Cost']).sum()*100) if (df['Shares']*df['Avg Cost']).sum()>0 else 0:.2f}%")
+        total_mv, total_inc = df['MV'].sum(), df['Income'].sum()
+        m1.metric("Balance", f"${total_mv:,.0f}")
+        m2.metric("Annual Income", f"${total_inc:,.2f}")
+        m3.metric("Div. Yield", f"{(total_inc/total_mv*100) if total_mv>0 else 0:.2f}%")
+        m4.metric("YOC", f"{(total_inc/(df['Shares']*df['Avg Cost']).sum()*100) if (df['Shares']*df['Avg Cost']).sum()>0 else 0:.2f}%")
 
         st.divider()
         c1, c2, c3 = st.columns(3)
 
-        def draw_donut(pdf, val_col, label_col, hole=0.5):
+        def draw_donut_v85(pdf, val_col, label_col, total_overall, hole=0.5):
             def agg(g):
                 s_g = g.sort_values(val_col, ascending=False).head(15)
                 b = "<br>".join([f"• {t}: <b>${amt:,.2f}</b>" for t, amt in zip(s_g['Ticker'], s_g[val_col])])
-                return pd.Series({'Val': g[val_col].sum(), 'Hover': f"<b>Total: ${g[val_col].sum():,.2f}</b><br><br>{b}"})
+                perc = (g[val_col].sum() / total_overall * 100) if total_overall > 0 else 0
+                return pd.Series({'Val': g[val_col].sum(), 'Hover': f"<b>{g.name}: {perc:.1f}%</b><br>Total: ${g[val_col].sum():,.2f}<br><br>{b}"})
             sum_df = pdf.groupby(label_col).apply(agg).reset_index()
             colors = ['#2ecc71', '#f1c40f', '#e74c3c'] if label_col == 'Safety' else px.colors.qualitative.Pastel
-            f = go.Figure(data=[go.Pie(labels=sum_df[label_col], values=sum_df['Val'], hole=hole, marker=dict(colors=colors), customdata=sum_df['Hover'], hovertemplate="<b>%{label}</b><br>%{customdata}<extra></extra>")])
+            f = go.Figure(data=[go.Pie(labels=sum_df[label_col], values=sum_df['Val'], hole=hole, marker=dict(colors=colors), customdata=sum_df['Hover'], hovertemplate="<b>%{customdata}</b><extra></extra>")])
             f.update_layout(height=600, margin=dict(t=30, b=80), hoverlabel=HOVER_STYLE)
             st.plotly_chart(f, use_container_width=True)
 
         with c1:
             st.subheader("Dynamic Safety Rating")
-            draw_donut(df, "Income", "Safety", hole=0.6)
+            draw_donut_v85(df, "Income", "Safety", total_inc, hole=0.6)
         with c2:
             st.subheader("10-Year Income Forecast")
             g_rate = st.number_input("Growth %", value=6.0, step=0.5)
-            proj = [df['Income'].sum() * ((1 + g_rate/100)**i) for i in range(11)]
+            proj = [total_inc * ((1 + g_rate/100)**i) for i in range(11)]
             fig_g = px.area(x=[datetime.now().year + i for i in range(11)], y=proj)
-            fig_g.update_layout(hoverlabel=HOVER_STYLE, height=450)
-            fig_g.update_traces(hovertemplate="<b>Year: %{x}</b><br>Income: $%{y:,.2f}<extra></extra>")
+            fig_g.update_layout(hoverlabel=HOVER_STYLE, height=450); fig_g.update_traces(hovertemplate="<b>Year: %{x}</b><br>Income: $%{y:,.2f}<extra></extra>")
             st.plotly_chart(fig_g, use_container_width=True)
         with c3:
             st.subheader("Sector Allocation")
             v_t = st.radio("Toggle View:", ["Market Value", "Annual Income"], horizontal=True)
-            draw_donut(df, "MV" if v_t == "Market Value" else "Income", "Sector")
+            draw_donut_v85(df, "MV" if v_t == "Market Value" else "Income", "Sector", total_mv if v_t == "Market Value" else total_inc)
 
         st.divider()
         st.subheader("📅 Monthly Income Distribution")
@@ -255,8 +236,7 @@ with t_dash:
                 return pd.Series({'Total': g['Income'].sum(), 'Break': f"<b>Monthly Total: ${g['Income'].sum():,.2f}</b><br><br>{b}"})
             c_sum = c_df.groupby(['Month', 'Sort']).apply(m_stats).reset_index().sort_values('Sort')
             fig_c = go.Figure(data=[go.Bar(x=c_sum['Month'], y=c_sum['Total'], text=c_sum['Total'], texttemplate='$%{text:.2s}', customdata=c_sum['Break'], hovertemplate="<b>%{x}</b><br>%{customdata}<extra></extra>")])
-            fig_c.update_layout(hoverlabel=HOVER_STYLE, height=550)
-            st.plotly_chart(fig_c, use_container_width=True)
+            fig_c.update_layout(hoverlabel=HOVER_STYLE, height=550); st.plotly_chart(fig_c, use_container_width=True)
 
         st.subheader("Detailed Analytics")
         df['Yield'] = df['Div'] / df['Price'].replace(0, 1)
