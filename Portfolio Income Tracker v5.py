@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
 import os
+import time
 
 # --- CONFIG & STYLING ---
 st.set_page_config(layout="wide", page_title="Income Portfolio Tracker by QTI")
@@ -14,76 +15,91 @@ st.markdown("""
     .stTabs [data-baseweb="tab"] p { font-size: 28px !important; font-weight: 700 !important; }
     [data-testid="stMetricLabel"] p { font-size: 24px !important; font-weight: 800 !important; color: #333 !important; }
     [data-testid="stMetricValue"] { font-size: 48px !important; }
-    .app-branding { font-size: 22px !important; color: #7f8c8d; }
-    .master-title { font-size: 52px !important; color: #2c3e50; font-weight: 900; border-bottom: 3px solid #2ecc71; }
+    .app-branding { font-size: 22px !important; color: #7f8c8d; font-weight: 400; margin-bottom: -10px; }
+    .master-title { 
+        font-size: 52px !important; 
+        color: #2c3e50; 
+        font-weight: 900;
+        margin-bottom: 10px;
+        border-bottom: 3px solid #2ecc71;
+        padding-bottom: 10px;
+    }
+    .stDataFrame { font-size: 18px !important; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- ARCHITECT'S DATA ENGINE (Version 6.4) ---
+# Shared hover style for 22px font size
+HOVER_STYLE = dict(bgcolor="white", font_size=22, font_family="Arial", bordercolor="#2ecc71")
+
+# --- DATA ENGINE ---
 @st.cache_data(ttl=3600)
-def get_bulk_metadata(tickers):
-    if not tickers: return {}, {}
+def get_cloud_data(tickers):
+    if not tickers: return {}
     
-    # Rule 2 & 3: Bulk download with auto_adjust to handle Multi-Index and Naming
-    raw_data = yf.download(tickers, period="1d", auto_adjust=True, group_by='column')
-    
-    # Rule 2: Isolate the 'Close' attribute to flatten the Multi-Index
+    # Bulk Download for Price (Flattening Multi-Index)
+    raw_data = yf.download(tickers, period="1d", auto_adjust=True)
     if len(tickers) > 1:
         prices_df = raw_data['Close']
     else:
         prices_df = raw_data[['Close']]
         prices_df.columns = tickers
-
     prices = prices_df.iloc[-1].to_dict()
     
-    # Fetching Dividends and Metadata
     meta = {}
     for t in tickers:
         try:
             tk = yf.Ticker(t)
-            # Use fast_info for cloud stability
             info = tk.info
+            
+            # Dividend Fallback Logic
             div = info.get('dividendRate') or 0
-            if div == 0: # Fallback to history if blocked
+            if div == 0:
                 h = tk.dividends
                 div = h.last('365D').sum() if not h.empty else 0
+            
+            # Safety Logic
+            payout = info.get('payoutRatio', 0) or 0
+            debt_to_equity = (info.get('debtToEquity', 0) or 0) / 100
+            
+            red_flags = 0
+            if payout > 0.80: red_flags += 1
+            if debt_to_equity > 2.0: red_flags += 1
+            
+            tier = "Tier 1: ✅ SAFE" if red_flags == 0 else ("Tier 2: ⚠️ STABLE" if red_flags == 1 else "Tier 3: 🚨 RISK")
             
             meta[t] = {
                 'price': prices.get(t, 0),
                 'div': div,
                 'sector': info.get('sector', 'Other'),
                 'name': info.get('shortName', t),
-                'payout': info.get('payoutRatio', 0)
+                'safety': tier,
+                'yield': (div / prices.get(t, 1)) if prices.get(t, 0) > 0 else 0
             }
         except:
-            meta[t] = {'price': prices.get(t, 0), 'div': 0, 'sector': 'Other', 'name': t, 'payout': 0}
-            
+            meta[t] = {'price': prices.get(t, 0), 'div': 0, 'sector': 'Other', 'name': t, 'safety': 'Tier 3: 🚨 RISK', 'yield': 0}
     return meta
 
 def clean_numeric(value):
-    try:
-        return float(str(value).replace('$', '').replace(',', '').strip())
-    except:
-        return 0.0
+    try: return float(str(value).replace('$', '').replace(',', '').strip())
+    except: return 0.0
 
-# --- SESSION STATE & AUTO-LOAD ---
+# --- SESSION STATE & LOADING ---
 if 'portfolios' not in st.session_state:
     st.session_state.portfolios = {}
-    SAMPLE = "Sample Portfolio.csv"
-    if os.path.exists(SAMPLE):
+    if os.path.exists("Sample Portfolio.csv"):
         try:
-            df = pd.read_csv(SAMPLE)
+            df = pd.read_csv("Sample Portfolio.csv")
             df.columns = df.columns.str.strip()
             df = df[["Ticker", "Shares", "Avg Cost"]].dropna()
             df['Shares'] = df['Shares'].apply(clean_numeric)
             df['Avg Cost'] = df['Avg Cost'].apply(clean_numeric)
-            st.session_state.portfolios[SAMPLE] = df
-            st.session_state.active_portfolio_name = SAMPLE
+            st.session_state.portfolios["Sample Portfolio.csv"] = df
+            st.session_state.active_portfolio_name = "Sample Portfolio.csv"
         except: pass
 
-# --- SIDEBAR & NAVIGATION ---
+# --- SIDEBAR ---
 with st.sidebar:
-    st.header("📂 Vault")
+    st.header("📂 Portfolio Vault")
     up = st.file_uploader("Upload CSV", type="csv", accept_multiple_files=True)
     if up:
         for f in up:
@@ -95,7 +111,7 @@ with st.sidebar:
     
     if st.session_state.portfolios:
         for n in list(st.session_state.portfolios.keys()):
-            if st.sidebar.button(f"📍 {n}" if n == st.session_state.active_portfolio_name else n, use_container_width=True):
+            if st.sidebar.button(f"📍 {n.replace('.csv','')}" if n == st.session_state.get('active_portfolio_name') else n.replace('.csv',''), use_container_width=True):
                 st.session_state.active_portfolio_name = n
                 st.rerun()
 
@@ -104,65 +120,84 @@ st.markdown('<div class="app-branding">Income Portfolio Tracker by QTI</div>', u
 active = st.session_state.get('active_portfolio_name')
 
 if not active:
-    st.info("Please upload or select a portfolio.")
     st.stop()
 
 st.markdown(f'<div class="master-title">Portfolio: {active.replace(".csv","")}</div>', unsafe_allow_html=True)
-t_dash, t_edit = st.tabs(["📊 Dashboard", "✏️ Edit"])
+t_dash, t_edit = st.tabs(["📊 Dashboard & Analytics", "✏️ Edit Positions"])
 
 with t_edit:
     df_edit = st.session_state.portfolios[active]
-    with st.form("add_ticker"):
+    with st.form("edit_form"):
         c1, c2, c3 = st.columns(3)
-        nt = c1.text_input("Ticker").upper()
+        nt = c1.text_input("Ticker Symbol").upper()
         ns = c2.number_input("Shares", min_value=0.0)
         nc = c3.number_input("Avg Cost", min_value=0.0)
-        if st.form_submit_button("Add/Update"):
+        if st.form_submit_button("Commit Changes"):
             if nt in df_edit['Ticker'].values:
                 df_edit.loc[df_edit['Ticker']==nt, ['Shares','Avg Cost']] = [ns, nc]
             else:
                 st.session_state.portfolios[active] = pd.concat([df_edit, pd.DataFrame([{"Ticker":nt, "Shares":ns, "Avg Cost":nc}])])
             st.rerun()
-    st.dataframe(df_edit, use_container_width=True)
+    st.dataframe(df_edit, use_container_width=True, hide_index=True)
 
 with t_dash:
     df = st.session_state.portfolios[active].copy()
     if not df.empty:
         tickers = df['Ticker'].unique().tolist()
-        with st.spinner("Fetching Cloud Data..."):
-            meta = get_bulk_metadata(tickers)
+        with st.spinner("Syncing Live Data..."):
+            meta = get_cloud_data(tickers)
         
         df['Price'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('price', 0))
         df['Div'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('div', 0))
+        df['Yield'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('yield', 0))
         df['Sector'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('sector', 'Other'))
-        df['MV'] = df['Shares'] * df['Price']
-        df['Income'] = df['Shares'] * df['Div']
+        df['Safety'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('safety', 'Unknown'))
+        df['Market Value'] = df['Shares'] * df['Price']
+        df['Annual Income'] = df['Shares'] * df['Div']
         
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Balance", f"${df['MV'].sum():,.0f}")
-        m2.metric("Income", f"${df['Income'].sum():,.0f}")
-        m3.metric("Yield", f"{(df['Income'].sum()/df['MV'].sum()*100) if df['MV'].sum()>0 else 0:.2f}%")
+        # Metrics Row
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Account Balance", f"${df['Market Value'].sum():,.0f}")
+        m2.metric("Annual Income", f"${df['Annual Income'].sum():,.0f}")
+        m3.metric("Div. Yield", f"{(df['Annual Income'].sum()/df['Market Value'].sum()*100) if df['Market Value'].sum()>0 else 0:.2f}%")
+        m4.metric("Yield on Cost", f"{(df['Annual Income'].sum()/(df['Shares']*df['Avg Cost']).sum()*100) if (df['Shares']*df['Avg Cost']).sum()>0 else 0:.2f}%")
         
         st.divider()
-        c1, c2 = st.columns(2)
+        
+        # Analytics Row
+        c1, c2, c3 = st.columns(3)
+        
         with c1:
-            st.subheader("Sector Allocation")
-            v = st.radio("By:", ["MV", "Income"], horizontal=True)
-            fig = px.pie(df, values=v, names='Sector', hole=0.5)
-            # Architect Rule: Use explicit hover formatting
-            fig.update_traces(textinfo='percent+label', hovertemplate="<b>%{label}</b><br>Value: $%{value:,.2f}")
-            st.plotly_chart(fig, use_container_width=True)
+            st.subheader("Dynamic Safety Rating")
+            saf_sum = df.groupby('Safety')['Annual Income'].sum().reset_index()
+            fig_saf = px.pie(saf_sum, values='Annual Income', names='Safety', hole=0.6)
+            fig_saf.update_layout(hoverlabel=HOVER_STYLE, margin=dict(t=20, b=20))
+            fig_saf.update_traces(hovertemplate="<b>%{label}</b><br>Income: $%{value:,.2f}<extra></extra>")
+            st.plotly_chart(fig_saf, use_container_width=True)
+            
         with c2:
             st.subheader("10-Year Income Forecast")
-            g = st.number_input("Growth %", value=6.0)
-            proj = [df['Income'].sum() * ((1 + g/100)**i) for i in range(11)]
-            fig_g = px.area(x=[2024+i for i in range(11)], y=proj)
-            fig_g.update_traces(hovertemplate="<b>Year: %{x}</b><br>Income: $%{y:,.2f}")
+            g = st.number_input("Growth Rate (%)", value=6.0, step=0.5)
+            proj = [df['Annual Income'].sum() * ((1 + g/100)**i) for i in range(11)]
+            fig_g = px.area(x=[datetime.now().year + i for i in range(11)], y=proj)
+            fig_g.update_layout(hoverlabel=HOVER_STYLE, xaxis_title="Year", yaxis_title="Income ($)")
+            fig_g.update_traces(hovertemplate="<b>Year: %{x}</b><br>Income: $%{y:,.2f}<extra></extra>")
             st.plotly_chart(fig_g, use_container_width=True)
+            
+        with c3:
+            st.subheader("Sector Allocation")
+            v_type = st.radio("View By:", ["Market Value", "Annual Income"], horizontal=True)
+            sec_sum = df.groupby('Sector')[v_type].sum().reset_index()
+            fig_sec = px.pie(sec_sum, values=v_type, names='Sector', hole=0.5)
+            fig_sec.update_layout(hoverlabel=HOVER_STYLE, margin=dict(t=20, b=20))
+            fig_sec.update_traces(hovertemplate="<b>%{label}</b><br>Amount: $%{value:,.2f}<extra></extra>")
+            st.plotly_chart(fig_sec, use_container_width=True)
 
+        st.write("---")
         st.subheader("Detailed Analytics")
-        # Rule 1: Using .format() is safe, avoiding .applymap()
-        st.dataframe(df.style.format({
-            'Price': '${:,.2f}', 'Div': '${:,.2f}', 
-            'MV': '${:,.0f}', 'Income': '${:,.2f}'
-        }), use_container_width=True)
+        # Ensure Safety is included in the columns
+        disp_df = df[['Ticker', 'Sector', 'Safety', 'Price', 'Yield', 'Market Value', 'Annual Income']].sort_values('Market Value', ascending=False)
+        st.dataframe(disp_df.style.format({
+            'Price': '${:,.2f}', 'Yield': '{:.2%}', 
+            'Market Value': '${:,.0f}', 'Annual Income': '${:,.2f}'
+        }), use_container_width=True, hide_index=True)
