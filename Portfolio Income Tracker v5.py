@@ -30,12 +30,10 @@ st.markdown("""
 
 HOVER_STYLE = dict(bgcolor="white", font_size=22, font_family="Arial", bordercolor="#2ecc71")
 
-# --- DATA ENGINE (ARCHITECT OPTIMIZED) ---
+# --- DATA ENGINE ---
 @st.cache_data(ttl=3600)
 def get_cloud_data(tickers):
     if not tickers: return {}
-    
-    # Bulk Download to flatten Multi-Index
     raw_data = yf.download(tickers, period="1d", auto_adjust=True)
     if len(tickers) > 1:
         prices_df = raw_data['Close']
@@ -49,33 +47,23 @@ def get_cloud_data(tickers):
         try:
             tk = yf.Ticker(t)
             info = tk.info
-            
             div = info.get('dividendRate') or 0
             if div == 0:
                 h = tk.dividends
                 div = h.last('365D').sum() if not h.empty else 0
             
-            # Payout Frequency Logic for Calendar
             last_div = info.get('lastDividendValue') or 0
             freq = 12 if (div/last_div > 10 if last_div > 0 else False) else 4
             ex_date = info.get('exDividendDate')
-
-            # Safety Logic
             payout = info.get('payoutRatio', 0) or 0
             tier = "Tier 1: ✅ SAFE" if payout < 0.75 else ("Tier 2: ⚠️ STABLE" if payout < 0.90 else "Tier 3: 🚨 RISK")
             
             meta[t] = {
-                'price': prices.get(t, 0),
-                'div': div,
-                'sector': info.get('sector', 'Other'),
-                'name': info.get('shortName', t),
-                'safety': tier,
-                'yield': (div / prices.get(t, 1)) if prices.get(t, 0) > 0 else 0,
-                'freq': freq,
-                'ex_date': ex_date
+                'price': prices.get(t, 0), 'div': div, 'sector': info.get('sector', 'Other'),
+                'name': info.get('shortName', t), 'safety': tier, 'freq': freq, 'ex_date': ex_date
             }
         except:
-            meta[t] = {'price': prices.get(t, 0), 'div': 0, 'sector': 'Other', 'name': t, 'safety': 'Tier 3: 🚨 RISK', 'yield': 0, 'freq': 4, 'ex_date': None}
+            meta[t] = {'price': prices.get(t, 0), 'div': 0, 'sector': 'Other', 'name': t, 'safety': 'Tier 3: 🚨 RISK', 'freq': 4, 'ex_date': None}
     return meta
 
 def clean_numeric(value):
@@ -90,8 +78,7 @@ if 'portfolios' not in st.session_state:
             df = pd.read_csv("Sample Portfolio.csv")
             df.columns = df.columns.str.strip()
             df = df[["Ticker", "Shares", "Avg Cost"]].dropna()
-            df['Shares'] = df['Shares'].apply(clean_numeric)
-            df['Avg Cost'] = df['Avg Cost'].apply(clean_numeric)
+            df['Shares'] = df['Shares'].apply(clean_numeric); df['Avg Cost'] = df['Avg Cost'].apply(clean_numeric)
             st.session_state.portfolios["Sample Portfolio.csv"] = df
             st.session_state.active_portfolio_name = "Sample Portfolio.csv"
         except: pass
@@ -103,18 +90,15 @@ with st.sidebar:
     if up:
         for f in up:
             if f.name not in st.session_state.portfolios:
-                d = pd.read_csv(f)
-                d.columns = d.columns.str.strip()
+                d = pd.read_csv(f); d.columns = d.columns.str.strip()
                 st.session_state.portfolios[f.name] = d[["Ticker", "Shares", "Avg Cost"]].dropna()
                 st.session_state.active_portfolio_name = f.name
-    
     if st.session_state.portfolios:
         for n in list(st.session_state.portfolios.keys()):
             if st.sidebar.button(f"📍 {n.replace('.csv','')}" if n == st.session_state.get('active_portfolio_name') else n.replace('.csv',''), use_container_width=True):
                 st.session_state.active_portfolio_name = n
                 st.rerun()
 
-# --- MAIN UI ---
 st.markdown('<div class="app-branding">Income Portfolio Tracker by QTI</div>', unsafe_allow_html=True)
 active = st.session_state.get('active_portfolio_name')
 if not active: st.stop()
@@ -130,10 +114,8 @@ with t_edit:
         ns = c2.number_input("Shares", min_value=0.0)
         nc = c3.number_input("Avg Cost", min_value=0.0)
         if st.form_submit_button("Commit Changes"):
-            if nt in df_edit['Ticker'].values:
-                df_edit.loc[df_edit['Ticker']==nt, ['Shares','Avg Cost']] = [ns, nc]
-            else:
-                st.session_state.portfolios[active] = pd.concat([df_edit, pd.DataFrame([{"Ticker":nt, "Shares":ns, "Avg Cost":nc}])])
+            if nt in df_edit['Ticker'].values: df_edit.loc[df_edit['Ticker']==nt, ['Shares','Avg Cost']] = [ns, nc]
+            else: st.session_state.portfolios[active] = pd.concat([df_edit, pd.DataFrame([{"Ticker":nt, "Shares":ns, "Avg Cost":nc}])])
             st.rerun()
     st.dataframe(df_edit, use_container_width=True, hide_index=True)
 
@@ -141,12 +123,11 @@ with t_dash:
     df = st.session_state.portfolios[active].copy()
     if not df.empty:
         tickers = df['Ticker'].unique().tolist()
-        with st.spinner("Syncing Live Data..."):
-            meta = get_cloud_data(tickers)
+        with st.spinner("Syncing Live Data..."): meta = get_cloud_data(tickers)
         
         df['Price'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('price', 0))
         df['Div'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('div', 0))
-        df['Yield'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('yield', 0))
+        df['Yield'] = df['Div'] / df['Price']
         df['Sector'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('sector', 'Other'))
         df['Safety'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('safety', 'Unknown'))
         df['Freq'] = df['Ticker'].map(lambda x: meta.get(x, {}).get('freq', 4))
@@ -154,20 +135,23 @@ with t_dash:
         df['Market Value'] = df['Shares'] * df['Price']
         df['Annual Income'] = df['Shares'] * df['Div']
         
-        # Metrics
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Account Balance", f"${df['Market Value'].sum():,.0f}")
         m2.metric("Annual Income", f"${df['Annual Income'].sum():,.0f}")
         m3.metric("Div. Yield", f"{(df['Annual Income'].sum()/df['Market Value'].sum()*100) if df['Market Value'].sum()>0 else 0:.2f}%")
         m4.metric("Yield on Cost", f"{(df['Annual Income'].sum()/(df['Shares']*df['Avg Cost']).sum()*100) if (df['Shares']*df['Avg Cost']).sum()>0 else 0:.2f}%")
-        
         st.divider()
+
         c1, c2, c3 = st.columns(3)
         with c1:
             st.subheader("Dynamic Safety Rating")
-            fig_saf = px.pie(df, values='Annual Income', names='Safety', hole=0.6)
+            def get_breakdown(g):
+                s_g = g.sort_values('Annual Income', ascending=False)
+                b = "<br>".join([f"• {t}: <b>${amt:,.2f}</b>" for t, amt in zip(s_g['Ticker'], s_g['Annual Income'])])
+                return pd.Series({'Val': g['Annual Income'].sum(), 'Hover': f"<b>Annual Income: ${g['Annual Income'].sum():,.2f}</b><br><br>{b}"})
+            saf_sum = df.groupby('Safety').apply(get_breakdown).reset_index()
+            fig_saf = go.Figure(data=[go.Pie(labels=saf_sum['Safety'], values=saf_sum['Val'], hole=0.6, customdata=saf_sum['Hover'], hovertemplate="<br><span style='font-size:24px; font-weight:bold;'>%{label}</span><br><br>%{customdata}<br><extra></extra>")])
             fig_saf.update_layout(hoverlabel=HOVER_STYLE, margin=dict(t=20, b=20))
-            fig_saf.update_traces(hovertemplate="<b>%{label}</b><br>Income: $%{value:,.2f}<extra></extra>")
             st.plotly_chart(fig_saf, use_container_width=True)
         with c2:
             st.subheader("10-Year Income Forecast")
@@ -180,9 +164,13 @@ with t_dash:
         with c3:
             st.subheader("Sector Allocation")
             v_type = st.radio("View By:", ["Market Value", "Annual Income"], horizontal=True)
-            fig_sec = px.pie(df, values=v_type, names='Sector', hole=0.5)
+            def get_sec_breakdown(g):
+                s_g = g.sort_values(v_type, ascending=False)
+                b = "<br>".join([f"• {t}: <b>${amt:,.2f}</b>" for t, amt in zip(s_g['Ticker'], s_g[v_type])])
+                return pd.Series({'Val': g[v_type].sum(), 'Hover': f"<b>Total {v_type}: ${g[v_type].sum():,.2f}</b><br><br>{b}"})
+            sec_sum = df.groupby('Sector').apply(get_sec_breakdown).reset_index()
+            fig_sec = go.Figure(data=[go.Pie(labels=sec_sum['Sector'], values=sec_sum['Val'], hole=0.5, customdata=sec_sum['Hover'], hovertemplate="<br><span style='font-size:24px; font-weight:bold;'>%{label}</span><br><br>%{customdata}<br><extra></extra>")])
             fig_sec.update_layout(hoverlabel=HOVER_STYLE, margin=dict(t=20, b=20))
-            fig_sec.update_traces(hovertemplate="<b>%{label}</b><br>Amount: $%{value:,.2f}<extra></extra>")
             st.plotly_chart(fig_sec, use_container_width=True)
 
         st.write("---")
@@ -198,10 +186,13 @@ with t_dash:
                     cal_list.append({'Ticker': r['Ticker'], 'Month': mnths[idx], 'Income': r['Annual Income']/f, 'Sort': idx})
         if cal_list:
             c_df = pd.DataFrame(cal_list)
-            c_sum = c_df.groupby(['Month', 'Sort'])['Income'].sum().reset_index().sort_values('Sort')
-            fig_c = px.bar(c_sum, x='Month', y='Income', text_auto='.2s')
+            def m_stats(g):
+                s_g = g.sort_values('Income', ascending=False)
+                b = "<br>".join([f"• {t}: <b>${amt:,.2f}</b>" for t, amt in zip(s_g['Ticker'], s_g['Income'])])
+                return pd.Series({'Total': g['Income'].sum(), 'Break': b})
+            c_sum = c_df.groupby(['Month', 'Sort']).apply(m_stats).reset_index().sort_values('Sort')
+            fig_c = go.Figure(data=[go.Bar(x=c_sum['Month'], y=c_sum['Total'], text=c_sum['Total'], texttemplate='$%{text:.2s}', customdata=c_sum['Break'], hovertemplate="<br><span style='font-size:24px; font-weight:bold;'>%{x} Total: $%{y:,.2f}</span><br><br>%{customdata}<br><extra></extra>")])
             fig_c.update_layout(hoverlabel=HOVER_STYLE, height=500)
-            fig_c.update_traces(hovertemplate="<b>%{x} Total: $%{y:,.2f}</b><extra></extra>")
             st.plotly_chart(fig_c, use_container_width=True)
             
         st.subheader("Detailed Analytics")
